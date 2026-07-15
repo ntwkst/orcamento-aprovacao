@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Aprovação de Orçamento | NTWKST</title>
+  <style>
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f3f4f6;color:#111}
+    .wrap{max-width:960px;margin:0 auto;padding:24px 16px 48px}
+    .card{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow:hidden}
+    .head{background:#002855;color:#fff;padding:28px 24px}
+    .body{padding:24px}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{border:1px solid #d1d5db;padding:10px 12px;vertical-align:top}
+    th{background:#002855;color:#fff;text-align:left}
+    .foot{background:#002855;color:#fff;padding:20px;text-align:center;font-size:13px}
+    .muted{color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+    .err{color:#b91c1c;text-align:center}
+    .btn{padding:14px 28px;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer}
+    .btn-ok{background:#002855;color:#fff}
+    .btn-no{background:#dc2626;color:#fff}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .scroll{overflow-x:auto}
+    #loading{padding:48px;text-align:center;color:#4b5563}
+  </style>
+</head>
+<body>
+  <div class="wrap" id="app"><div id="loading">Carregando orçamento…</div></div>
+  <script>
+(function () {
+  var SUPABASE_URL = "https://vtyentzijjlrehkzsnkr.supabase.co";
+  var ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ0eWVudHppampscmVoa3pzbmtyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTI4NDk2NzUsImV4cCI6MjA2ODQyNTY3NX0.ko6G95McWnS0BNKL9f6bUmDIiynn6YGleKFO8Fyv0U4";
+  // overwritten below with project anon if present
+  var API = SUPABASE_URL + "/functions/v1/quote-public";
+  var params = new URLSearchParams(location.search);
+  var token = params.get("token") || "";
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function fmtBRL(v) {
+    return Number(v || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  }
+  function fmtDate(iso) {
+    if (!iso) return null;
+    var p = String(iso).slice(0, 10).split("-");
+    if (p.length < 3) return null;
+    return p[2] + "/" + p[1] + "/" + p[0];
+  }
+  function paymentText(item) {
+    if (Number(item.total) <= 0) return "—";
+    var suffix = item.recorrente ? " (mensal)" : "";
+    if (!item.permite_parcelamento) {
+      var d = fmtDate(item.data_a_vista);
+      return fmtBRL(item.total) + " à vista" + suffix + (d ? " em " + d : "");
+    }
+    var total = Number(item.total) || 0;
+    var aVista = Math.min(Math.max(0, Number(item.valor_a_vista) || 0), total);
+    var restante = Math.max(0, total - aVista);
+    var n = Math.min(12, Math.max(1, Number(item.numero_parcelas) || 1));
+    if (restante <= 0.009) {
+      var d2 = fmtDate(item.data_a_vista || item.data_entrada);
+      return fmtBRL(aVista > 0 ? aVista : total) + " à vista" + suffix + (d2 ? " em " + d2 : "");
+    }
+    var parcela = restante / n;
+    var parts = [];
+    if (aVista > 0.009) {
+      var dEnt = fmtDate(item.data_entrada);
+      parts.push("Entrada " + fmtBRL(aVista) + (dEnt ? " em " + dEnt : ""));
+    }
+    var dParc = fmtDate(item.data_vencimento_parcela);
+    parts.push(n + "x de " + fmtBRL(parcela) + (dParc ? " (1ª em " + dParc + ")" : "") + suffix);
+    return parts.join(" + ");
+  }
+  function splitItems(items, hasPlano) {
+    var planBullets = hasPlano
+      ? items.filter(function (i) {
+          return i.recorrente && Number(i.preco_unitario || 0) === 0 && Number(i.total || 0) === 0;
+        })
+      : [];
+    var serviceItems = hasPlano
+      ? items.filter(function (i) {
+          return !(i.recorrente && Number(i.preco_unitario || 0) === 0 && Number(i.total || 0) === 0);
+        })
+      : items;
+    return { planBullets: planBullets, serviceItems: serviceItems };
+  }
+
+  function render(quote, items) {
+    var hasPlano = !!quote.plano_id;
+    var parts = splitItems(items, hasPlano);
+    var serviceItems = parts.serviceItems;
+    var planBullets = parts.planBullets;
+    var showGrand = quote.exibir_total_geral === true;
+    var status = String(quote.status || "");
+    var isOpen = status === "enviado";
+    var isAceito = status === "aceito";
+    var isRecusado = status === "recusado";
+    var priced = serviceItems.filter(function (i) {
+      return Number(i.total) > 0 || Number(i.preco_unitario) > 0;
+    });
+    var canChoose = isOpen && priced.length > 0;
+
+    var badge =
+      status === "enviado"
+        ? '<span style="background:#dbeafe;color:#1e40af;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;">Aguardando sua decisão</span>'
+        : status === "aceito"
+        ? '<span style="background:#dcfce7;color:#166534;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;">Aceito</span>'
+        : status === "recusado"
+        ? '<span style="background:#fee2e2;color:#991b1b;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;">Recusado</span>'
+        : esc(status);
+
+    var planHtml = "";
+    if (planBullets.length) {
+      planHtml =
+        '<div class="scroll" style="margin-bottom:16px;"><table><tr><th colspan="2">' +
+        esc(quote.plano_nome || "Plano de Serviços") +
+        "</th></tr>" +
+        planBullets
+          .map(function (i) {
+            return "<tr><td colspan=\"2\">• " + esc(i.descricao) + "</td></tr>";
+          })
+          .join("") +
+        "</table></div>";
+    }
+
+    var selHead =
+      canChoose || isAceito || isRecusado
+        ? "<th style=\"width:52px;text-align:center\">" + (canChoose ? "OK" : "Sit.") + "</th>"
+        : "";
+
+    var rows = serviceItems
+      .map(function (item, idx) {
+        var bg = idx % 2 === 0 ? "#f9fafb" : "#fff";
+        var isPriced = Number(item.total) > 0 || Number(item.preco_unitario) > 0;
+        var sel = "";
+        if (canChoose && isPriced) {
+          sel =
+            '<td style="text-align:center"><input type="checkbox" class="item-check" value="' +
+            esc(item.id) +
+            '" data-total="' +
+            (Number(item.total) || 0) +
+            '" checked/></td>';
+        } else if (isAceito || isRecusado) {
+          sel =
+            '<td style="text-align:center;font-size:12px">' +
+            (item.aprovado_pelo_cliente === true
+              ? '<span style="color:#15803d;font-weight:600">Aprovado</span>'
+              : item.aprovado_pelo_cliente === false
+              ? '<span style="color:#6b7280">Não</span>'
+              : "—") +
+            "</td>";
+        } else if (canChoose || isAceito || isRecusado) {
+          sel = "<td></td>";
+        }
+        return (
+          '<tr style="background:' +
+          bg +
+          '">' +
+          sel +
+          "<td><div style=\"font-weight:600\">" +
+          esc(item.descricao) +
+          "</div>" +
+          (item.recorrente
+            ? '<div style="margin-top:4px;font-size:11px;color:#1e40af">Mensal / recorrente</div>'
+            : "") +
+          "</td><td style=\"text-align:center\">" +
+          esc(item.quantidade) +
+          '</td><td style="text-align:right;color:#002855">' +
+          fmtBRL(item.preco_unitario) +
+          '</td><td style="text-align:right;font-weight:600">' +
+          fmtBRL(item.total) +
+          '</td><td style="color:#166534;font-weight:600;font-size:13px">' +
+          esc(paymentText(item)) +
+          "</td></tr>"
+        );
+      })
+      .join("");
+
+    var chooseBar = canChoose
+      ? '<p style="margin:0 0 10px;padding:10px 12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;color:#1e3a8a;font-size:14px">' +
+        "Selecione os itens que deseja aprovar. " +
+        '<button type="button" id="btnAll" style="background:none;border:none;color:#002855;text-decoration:underline;cursor:pointer">Marcar todos</button> ' +
+        '<button type="button" id="btnNone" style="background:none;border:none;color:#4b5563;text-decoration:underline;cursor:pointer">Desmarcar</button></p>'
+      : "";
+
+    var totals =
+      showGrand
+        ? '<div style="margin:24px 0;padding-top:20px;border-top:2px solid #e5e7eb;text-align:center">' +
+          '<p class="muted" style="margin:0 0 6px">Valor total</p>' +
+          '<p style="margin:0;font-size:32px;font-weight:700;color:#002855">' +
+          fmtBRL(quote.total) +
+          "</p></div>"
+        : "";
+
+    var actions = "";
+    if (isOpen) {
+      actions =
+        '<div style="margin:28px 0 12px"><h3 style="margin:0 0 8px;color:#002855">Assinatura digital</h3>' +
+        "<p style=\"margin:0 0 10px;color:#4b5563;font-size:14px\">Desenhe sua assinatura para confirmar o aceite" +
+        (canChoose ? " dos itens selecionados" : "") +
+        '.</p><div style="border:2px dashed #002855;border-radius:8px;background:#f9fafb">' +
+        '<canvas id="sig" width="800" height="160" style="width:100%;height:160px;touch-action:none;cursor:crosshair;display:block"></canvas></div>' +
+        '<button type="button" id="btnClear" style="margin-top:8px;padding:8px 14px;border:1px solid #d1d5db;border-radius:6px;background:#fff;cursor:pointer">Limpar</button></div>' +
+        (canChoose ? '<p id="selInfo" style="text-align:center;color:#374151;font-size:14px"></p>' : "") +
+        '<div style="display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin:20px 0 8px">' +
+        '<button type="button" class="btn btn-ok" id="btnAccept">' +
+        (canChoose ? "Aceitar itens selecionados" : "Aceitar orçamento") +
+        '</button><button type="button" class="btn btn-no" id="btnReject">Recusar orçamento</button></div>' +
+        '<p class="err" id="err"></p>';
+    }
+
+    document.getElementById("app").innerHTML =
+      '<div class="card"><div class="head"><div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start">' +
+      "<div><h1 style=\"margin:0;font-size:22px\">Orçamento " +
+      esc(quote.numero_orcamento) +
+      '</h1><p style="margin:8px 0 0;opacity:.85;font-size:14px">Network Soluções Tecnológicas</p></div>' +
+      badge +
+      '</div></div><div class="body">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">' +
+      '<div><p class="muted" style="margin:0 0 4px">Cliente</p><p style="margin:0;font-weight:600">' +
+      esc(quote.cliente_nome) +
+      "</p>" +
+      (quote.cliente_email
+        ? '<p style="margin:4px 0 0;font-size:14px;color:#4b5563">' + esc(quote.cliente_email) + "</p>"
+        : "") +
+      '</div><div><p class="muted" style="margin:0 0 4px">Validade</p><p style="margin:0;font-weight:600">' +
+      esc(fmtDate(quote.data_validade) || "—") +
+      "</p></div></div>" +
+      '<h2 style="margin:0 0 12px;color:#002855;font-size:18px">Itens do orçamento</h2>' +
+      chooseBar +
+      planHtml +
+      '<div class="scroll"><table><thead><tr>' +
+      selHead +
+      "<th>Descrição</th><th style=\"text-align:center\">Qtd</th><th style=\"text-align:right\">Unit.</th><th style=\"text-align:right\">Total</th><th>Forma de pagamento</th></tr></thead><tbody>" +
+      rows +
+      "</tbody></table></div>" +
+      totals +
+      (quote.observacoes
+        ? '<div style="margin:20px 0;padding:14px;background:#f3f4f6;border-radius:8px"><p style="margin:0 0 6px;font-weight:600">Informações adicionais</p><p style="margin:0;font-size:14px;white-space:pre-wrap">' +
+          esc(quote.observacoes) +
+          "</p></div>"
+        : "") +
+      actions +
+      '</div><div class="foot"><p style="margin:0 0 4px;font-weight:700">Network Soluções Tecnológicas</p><p style="margin:0;opacity:.85">Chapadão do Sul - MS | (67) 9-9921-1358 | contato@ntwkst.it</p></div></div>';
+
+    wire(canChoose);
+  }
+
+  function wire(canChoose) {
+    var hasDrawn = false;
+    function updateSel() {
+      if (!canChoose) return;
+      var n = 0, t = 0;
+      document.querySelectorAll(".item-check").forEach(function (b) {
+        if (b.checked) {
+          n++;
+          t += parseFloat(b.getAttribute("data-total") || "0");
+        }
+      });
+      var el = document.getElementById("selInfo");
+      if (el)
+        el.textContent =
+          n +
+          " item(ns) · Total selecionado: " +
+          t.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+    }
+    document.querySelectorAll(".item-check").forEach(function (b) {
+      b.addEventListener("change", updateSel);
+    });
+    var ba = document.getElementById("btnAll");
+    var bn = document.getElementById("btnNone");
+    if (ba)
+      ba.onclick = function () {
+        document.querySelectorAll(".item-check").forEach(function (b) {
+          b.checked = true;
+        });
+        updateSel();
+      };
+    if (bn)
+      bn.onclick = function () {
+        document.querySelectorAll(".item-check").forEach(function (b) {
+          b.checked = false;
+        });
+        updateSel();
+      };
+    updateSel();
+
+    var canvas = document.getElementById("sig");
+    if (canvas) {
+      var ctx = canvas.getContext("2d");
+      var drawing = false;
+      function pos(e) {
+        var r = canvas.getBoundingClientRect();
+        var x, y;
+        if (e.touches && e.touches[0]) {
+          x = e.touches[0].clientX - r.left;
+          y = e.touches[0].clientY - r.top;
+        } else {
+          x = e.clientX - r.left;
+          y = e.clientY - r.top;
+        }
+        return { x: x * (canvas.width / r.width), y: y * (canvas.height / r.height) };
+      }
+      function start(e) {
+        e.preventDefault();
+        drawing = true;
+        var p = pos(e);
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+      }
+      function move(e) {
+        if (!drawing) return;
+        e.preventDefault();
+        var p = pos(e);
+        ctx.strokeStyle = "#002855";
+        ctx.lineWidth = 2.5;
+        ctx.lineCap = "round";
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+        hasDrawn = true;
+      }
+      function end() {
+        drawing = false;
+      }
+      canvas.addEventListener("mousedown", start);
+      canvas.addEventListener("mousemove", move);
+      canvas.addEventListener("mouseup", end);
+      canvas.addEventListener("mouseleave", end);
+      canvas.addEventListener("touchstart", start, { passive: false });
+      canvas.addEventListener("touchmove", move, { passive: false });
+      canvas.addEventListener("touchend", end);
+      var bc = document.getElementById("btnClear");
+      if (bc)
+        bc.onclick = function () {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          hasDrawn = false;
+        };
+    }
+
+    function submit(decision) {
+      var err = document.getElementById("err");
+      if (err) err.textContent = "";
+      var item_ids = null;
+      if (decision === "aceito" && canChoose) {
+        item_ids = [];
+        document.querySelectorAll(".item-check:checked").forEach(function (b) {
+          item_ids.push(b.value);
+        });
+        if (!item_ids.length) {
+          if (err) err.textContent = "Marque ao menos um item para aprovar.";
+          return;
+        }
+        if (!hasDrawn) {
+          if (err) err.textContent = "Assine no campo acima antes de aceitar.";
+          return;
+        }
+      }
+      if (decision === "aceito" && !canChoose && !hasDrawn) {
+        if (err) err.textContent = "Assine no campo acima antes de aceitar.";
+        return;
+      }
+      var assinatura = null;
+      if (decision === "aceito" && canvas) assinatura = canvas.toDataURL("image/png");
+      var btnA = document.getElementById("btnAccept");
+      var btnR = document.getElementById("btnReject");
+      if (btnA) btnA.disabled = true;
+      if (btnR) btnR.disabled = true;
+      fetch(API, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: ANON_KEY,
+          Authorization: "Bearer " + ANON_KEY,
+        },
+        body: JSON.stringify({
+          token: token,
+          decision: decision,
+          assinatura: assinatura,
+          item_ids: item_ids,
+        }),
+      })
+        .then(function (r) {
+          return r.json().then(function (j) {
+            return { ok: r.ok, j: j };
+          });
+        })
+        .then(function (res) {
+          if (!res.ok) {
+            if (err) err.textContent = (res.j && res.j.error) || "Falha ao registrar decisão.";
+            if (btnA) btnA.disabled = false;
+            if (btnR) btnR.disabled = false;
+            return;
+          }
+          location.reload();
+        })
+        .catch(function () {
+          if (err) err.textContent = "Erro de rede. Tente novamente.";
+          if (btnA) btnA.disabled = false;
+          if (btnR) btnR.disabled = false;
+        });
+    }
+    var ba2 = document.getElementById("btnAccept");
+    var br2 = document.getElementById("btnReject");
+    if (ba2)
+      ba2.onclick = function () {
+        submit("aceito");
+      };
+    if (br2)
+      br2.onclick = function () {
+        submit("recusado");
+      };
+  }
+
+  // load real anon key then data
+  fetch(SUPABASE_URL + "/functions/v1/quote-public?token=" + encodeURIComponent(token) + "&format=json", {
+    headers: { Accept: "application/json" },
+  })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (data) {
+      if (data && data.anon_key) ANON_KEY = data.anon_key;
+      if (!data || !data.quote) {
+        document.getElementById("app").innerHTML =
+          '<div class="card"><div class="body"><p class="err">Orçamento não encontrado ou link inválido.</p></div></div>';
+        return;
+      }
+      render(data.quote, data.items || []);
+    })
+    .catch(function () {
+      document.getElementById("app").innerHTML =
+        '<div class="card"><div class="body"><p class="err">Não foi possível carregar o orçamento.</p></div></div>';
+    });
+})();
+  </script>
+</body>
+</html>
